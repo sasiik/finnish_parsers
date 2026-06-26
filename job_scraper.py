@@ -1,8 +1,11 @@
 """
 Build one Excel sheet of open Finnish vacancies from multiple sources.
 
-Sources pulled (both open JSON, no login or key):
+Sources pulled:
   1. te-palvelut / Job Market Finland  -> broad: public AND many private postings
+     NOTE: Requires a free KIPA-Subscription-Key from KEHA Centre.
+     Register at: https://tyomarkkinatori.fi/en/instructions-and-support/partners/interfaces-for-job-postings
+     Contact: tmt-rajapinnat@keha-keskus.fi
   2. Kuntarekry                         -> public sector (municipalities, wellbeing counties)
 
 Purely private boards (Duunitori, LinkedIn, Indeed) have no open API. If you
@@ -13,21 +16,24 @@ Setup (run once):
     pip install requests pandas openpyxl
 
 Run:
-    python finnish_jobs_to_excel.py
+    python job_scraper.py
 """
 
-import time
+import json
 import requests
 import pandas as pd
 
 # ----------------------------------------------------------------------
-# FILTERS
+# CONFIGURATION
 # ----------------------------------------------------------------------
-KEYWORD = ""          # search term, "" = no keyword filter (everything)
-# e.g. ["Uusimaa"], [] = all of Finland (te-palvelut only)
+# Get your free key from KEHA Centre: tmt-rajapinnat@keha-keskus.fi
+KIPA_SUBSCRIPTION_KEY = ""
+
+KEYWORD = ""          # keyword filter applied locally after fetch, "" = no filter
+# Region codes for te-palvelut, e.g. ["01"] for Uusimaa; [] = all of Finland
+# Full list: https://tyomarkkinatori.fi/dam/jcr:e9f1db95-5aad-4db4-bd7e-2d010479979a/definitions.zip
 REGIONS = []
 MAX_PER_SRC = 1000        # cap rows per source so the file stays manageable
-PAGE_SIZE = 100
 OUTPUT_FILE = "finnish_jobs.xlsx"
 # ----------------------------------------------------------------------
 
@@ -37,38 +43,67 @@ UNIFIED = ["source", "id", "title", "employer",
 
 
 def fetch_te_palvelut():
-    """Broad public + private feed behind Job Market Finland."""
-    base = "https://paikat.te-palvelut.fi/tpt-api/tyopaikat"
-    out, start = [], 0
-    while len(out) < MAX_PER_SRC:
-        params = {"hakusana": KEYWORD, "start": start, "rows": PAGE_SIZE}
-        if REGIONS:
-            params["alueet"] = ",".join(REGIONS)
+    """Broad public + private feed via Job Market Finland (tyomarkkinatori.fi).
+
+    Requires a KIPA-Subscription-Key — register free at KEHA Centre.
+    API: POST https://api.ahtp.fi/kipa/p67/v2/jobpostings
+    Response is Newline-delimited JSON (one JobPostingV2 object per line).
+    """
+    if not KIPA_SUBSCRIPTION_KEY:
+        print("te-palvelut skipped: set KIPA_SUBSCRIPTION_KEY (see comment at top of file)")
+        return []
+
+    url = "https://api.ahtp.fi/kipa/p67/v2/jobpostings"
+    headers = {
+        "Content-Type": "application/json",
+        "KIPA-Subscription-Key": KIPA_SUBSCRIPTION_KEY,
+    }
+    body = {"onlyStatus": "PUBLISHED"}
+    if REGIONS:
+        body["regionIn"] = REGIONS
+
+    try:
+        r = requests.post(url, json=body, headers=headers, timeout=60)
+        r.raise_for_status()
+    except Exception as e:
+        print(f"te-palvelut stopped: {e}")
+        return []
+
+    def _ml(obj, lang="fi"):
+        """Extract value from a multilingual dict, falling back to first available."""
+        if isinstance(obj, dict):
+            return obj.get(lang) or next(iter(obj.values()), None)
+        return obj
+
+    out = []
+    for line in r.text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
         try:
-            r = requests.get(base, params=params, timeout=30)
-            r.raise_for_status()
-            data = r.json()
-        except Exception as e:
-            print(f"te-palvelut stopped: {e}")
+            d = json.loads(line)
+        except ValueError:
+            continue
+
+        title = _ml(d.get("position", {}).get("title"))
+        description = _ml(d.get("position", {}).get("jobDescription")) or ""
+        if KEYWORD and KEYWORD.lower() not in f"{title} {description}".lower():
+            continue
+
+        out.append({
+            "source":      "te-palvelut",
+            "id":          d.get("metadata", {}).get("externalId"),
+            "title":       title,
+            "employer":    _ml(d.get("owner", {}).get("company")),
+            "location":    ", ".join(d.get("location", {}).get("municipalities") or []),
+            "deadline":    d.get("application", {}).get("expires"),
+            "url":         _ml(d.get("application", {}).get("url")),
+            "description": description,
+        })
+
+        if len(out) >= MAX_PER_SRC:
             break
 
-        docs = data.get("response", {}).get("docs") or data.get("docs") or []
-        if not docs:
-            break
-
-        for d in docs:
-            out.append({
-                "source":      "te-palvelut",
-                "id":          d.get("ilmoitusnumero"),
-                "title":       d.get("tehtavanimi") or d.get("otsikko"),
-                "employer":    d.get("tyonantajanNimi"),
-                "location":    d.get("kunnat") or d.get("alueet"),
-                "deadline":    d.get("hakuPaattyy"),
-                "url":         d.get("ilmoituksenURL") or d.get("url"),
-                "description": d.get("tehtavat"),
-            })
-        start += PAGE_SIZE
-        time.sleep(0.3)
     return out
 
 
