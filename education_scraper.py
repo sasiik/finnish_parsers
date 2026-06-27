@@ -18,6 +18,7 @@ import re
 import time
 import requests
 import pandas as pd
+from pathlib import Path
 from playwright.sync_api import sync_playwright, Page
 
 # ── FILTERS ───────────────────────────────────────────────────────────────────
@@ -31,7 +32,7 @@ FIELDS_OF_STUDY = ["tieto- ja viestintätekniikka"]
 # ""            = all
 DEGREE_LEVEL = "kandidaatti"
 
-OUTPUT_FILE = "finnish_education.xlsx"
+OUTPUT_FILE = "out/finnish_education.xlsx"
 PAGE_SIZE = 100
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -213,7 +214,8 @@ def main():
                 hk_oid = hk.get("oid")
                 if hk_oid:
                     pairs.append((detail, hk_oid))
-            print(f"  [{i}/{len(toteutus_oids)}] {oid} → {len(detail.get('hakukohteet', []))} hakukohdetta")
+            print(
+                f"  [{i}/{len(toteutus_oids)}] {oid} → {len(detail.get('hakukohteet', []))} hakukohdetta")
         except Exception as e:
             print(f"  [{i}/{len(toteutus_oids)}] {oid} → error: {e}")
         # time.sleep(0.2)
@@ -230,17 +232,20 @@ def main():
             try:
                 hk = fetch_hakukohde(hk_oid)
                 if not is_yhteishaku(hk):
-                    print(f"  [{i}/{len(pairs)}] {hk_oid} → skipped (not yhteishaku)")
+                    print(
+                        f"  [{i}/{len(pairs)}] {hk_oid} → skipped (not yhteishaku)")
                     continue
                 requires_degree = any(
-                    "pohjakoulutusvaatimuskouta_102" in (v.get("koodiUri") or "")
+                    "pohjakoulutusvaatimuskouta_102" in (
+                        v.get("koodiUri") or "")
                     for v in hk.get("pohjakoulutusvaatimus") or []
                 )
                 if DEGREE_LEVEL == "kandidaatti" and requires_degree:
                     print(f"  [{i}/{len(pairs)}] {hk_oid} → skipped (maisteri)")
                     continue
                 if DEGREE_LEVEL == "maisteri" and not requires_degree:
-                    print(f"  [{i}/{len(pairs)}] {hk_oid} → skipped (kandidaatti)")
+                    print(
+                        f"  [{i}/{len(pairs)}] {hk_oid} → skipped (kandidaatti)")
                     continue
                 rows.append(build_row(toteutus, hk, hk_oid, page))
                 print(f"  [{i}/{len(pairs)}] {hk_oid} → ok")
@@ -253,6 +258,7 @@ def main():
         print("No rows to write.")
         return
 
+    Path(OUTPUT_FILE).parent.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame(rows, columns=COLUMNS)
     df.to_excel(OUTPUT_FILE, index=False)
     print(f"\nWrote {len(df)} rows to '{OUTPUT_FILE}'")
